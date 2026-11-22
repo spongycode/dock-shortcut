@@ -5,6 +5,7 @@ local spaces = require("hs.spaces")
 local windowFilter = require("hs.window.filter")
 
 local SHOW_ALERT = true
+local SHOW_DOCK_BADGES = true
 local CYCLE_WINDOWS_IF_FOCUSED = true
 
 hs.autoLaunch(true)
@@ -119,6 +120,113 @@ local function getApplicationDockItems()
 
     return appItems
 end
+
+-- Dock number badges (shown only when Command alone is held)
+local dockBadgesCanvas = nil
+local dockBadgesTimer = nil
+
+local function hideDockBadges()
+    if dockBadgesTimer then
+        dockBadgesTimer:stop()
+        dockBadgesTimer = nil
+    end
+    if dockBadgesCanvas then
+        dockBadgesCanvas:delete()
+        dockBadgesCanvas = nil
+    end
+end
+
+local function showDockBadges()
+    if not SHOW_DOCK_BADGES or dockBadgesCanvas then return end
+
+    local appItems = getApplicationDockItems()
+    if not appItems or #appItems == 0 then return end
+
+    local points = {}
+    local minX, maxX = 999999, -999999
+    local minY, maxY = 999999, -999999
+
+    for idx = 1, math.min(#appItems, 10) do
+        local item = appItems[idx]
+        local f = item:attributeValue("AXFrame")
+        if f then
+            local cx = f.x + (f.w / 2)
+            local cy = f.y + 4
+            table.insert(points, { slot = idx - 1, cx = cx, cy = cy })
+            if cx < minX then minX = cx end
+            if cx > maxX then maxX = cx end
+            if cy < minY then minY = cy end
+            if cy > maxY then maxY = cy end
+        end
+    end
+
+    if #points == 0 then return end
+
+    local canvasX = minX - 25
+    local canvasY = minY - 25
+    local canvasW = (maxX - minX) + 50
+    local canvasH = 50
+
+    dockBadgesCanvas = hs.canvas.new({ x = canvasX, y = canvasY, w = canvasW, h = canvasH })
+    dockBadgesCanvas:level(hs.canvas.windowLevels.overlay)
+    dockBadgesCanvas:behavior(hs.canvas.windowBehaviors.canJoinAllSpaces + hs.canvas.windowBehaviors.stationary)
+
+    local elemIdx = 1
+    for _, p in ipairs(points) do
+        local lx = p.cx - canvasX
+        local ly = p.cy - canvasY
+
+        dockBadgesCanvas[elemIdx] = {
+            type = "circle",
+            action = "strokeAndFill",
+            center = { x = lx, y = ly },
+            radius = 11,
+            fillColor = { red = 0.12, green = 0.12, blue = 0.12, alpha = 0.95 },
+            strokeColor = { white = 1.0, alpha = 0.35 },
+            strokeWidth = 1.2,
+        }
+        elemIdx = elemIdx + 1
+
+        dockBadgesCanvas[elemIdx] = {
+            type = "text",
+            text = hs.styledtext.new(tostring(p.slot), {
+                font = { name = ".AppleSystemUIFontBold", size = 12 },
+                color = { white = 1.0, alpha = 1.0 },
+                paragraphStyle = { alignment = "center" }
+            }),
+            frame = { x = lx - 11, y = ly - 8, w = 22, h = 16 }
+        }
+        elemIdx = elemIdx + 1
+    end
+
+    dockBadgesCanvas:show()
+end
+
+local flagsWatcher = hs.eventtap.new({
+    hs.eventtap.event.types.flagsChanged,
+    hs.eventtap.event.types.keyDown
+}, function(event)
+    if event:getType() == hs.eventtap.event.types.keyDown then
+        hideDockBadges()
+        return false
+    end
+
+    local flags = event:getFlags()
+    local isOnlyCmd = flags.cmd and not flags.shift and not flags.alt and not flags.ctrl and not flags.fn
+
+    if isOnlyCmd then
+        if not dockBadgesCanvas and not dockBadgesTimer then
+            dockBadgesTimer = hs.timer.doAfter(0.14, function()
+                showDockBadges()
+                dockBadgesTimer = nil
+            end)
+        end
+    else
+        hideDockBadges()
+    end
+
+    return false
+end):start()
 
 -- Helper to get running hs.application for a dock item
 local function getAppForDockItem(dockItem)
@@ -240,6 +348,7 @@ end
 
 -- Helper to activate or cycle windows of an app
 local function activateDockSlot(slotNumber)
+    hideDockBadges()
     if not hs.accessibilityState() then
         hs.alert.show("Hammerspoon needs Accessibility permission! Restart Hammerspoon after granting.", 2)
         return
