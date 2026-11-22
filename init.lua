@@ -121,23 +121,35 @@ local function getApplicationDockItems()
     return appItems
 end
 
--- Dock number badges (shown only when Command alone is held)
+-- Dock number badges
 local dockBadgesCanvas = nil
 local dockBadgesTimer = nil
+local dockBadgesWatchdog = nil
+
+local function isCmdOnlyPressed()
+    local flags = hs.eventtap.checkKeyboardModifiers()
+    return (flags.cmd and not flags.shift and not flags.alt and not flags.ctrl and not flags.fn)
+end
 
 local function hideDockBadges()
     if dockBadgesTimer then
         dockBadgesTimer:stop()
         dockBadgesTimer = nil
     end
+    if dockBadgesWatchdog then
+        dockBadgesWatchdog:stop()
+        dockBadgesWatchdog = nil
+    end
+    if dockBadgesCanvas and dockBadgesCanvas:isShowing() then
+        dockBadgesCanvas:hide()
+    end
+end
+
+local function buildDockBadgesCanvas()
     if dockBadgesCanvas then
         dockBadgesCanvas:delete()
         dockBadgesCanvas = nil
     end
-end
-
-local function showDockBadges()
-    if not SHOW_DOCK_BADGES or dockBadgesCanvas then return end
 
     local appItems = getApplicationDockItems()
     if not appItems or #appItems == 0 then return end
@@ -198,15 +210,38 @@ local function showDockBadges()
         }
         elemIdx = elemIdx + 1
     end
+end
 
-    dockBadgesCanvas:show()
+local function showDockBadges()
+    if not SHOW_DOCK_BADGES then return end
+    if not isCmdOnlyPressed() then
+        hideDockBadges()
+        return
+    end
+
+    if not dockBadgesCanvas then
+        buildDockBadgesCanvas()
+    end
+
+    if dockBadgesCanvas and not dockBadgesCanvas:isShowing() then
+        dockBadgesCanvas:show()
+
+        if dockBadgesWatchdog then dockBadgesWatchdog:stop() end
+        dockBadgesWatchdog = hs.timer.doAfter(3.5, function()
+            hideDockBadges()
+        end)
+    end
 end
 
 local flagsWatcher = hs.eventtap.new({
     hs.eventtap.event.types.flagsChanged,
-    hs.eventtap.event.types.keyDown
+    hs.eventtap.event.types.keyDown,
+    hs.eventtap.event.types.leftMouseDown,
+    hs.eventtap.event.types.rightMouseDown
 }, function(event)
-    if event:getType() == hs.eventtap.event.types.keyDown then
+    local eventType = event:getType()
+
+    if eventType ~= hs.eventtap.event.types.flagsChanged then
         hideDockBadges()
         return false
     end
@@ -215,10 +250,10 @@ local flagsWatcher = hs.eventtap.new({
     local isOnlyCmd = flags.cmd and not flags.shift and not flags.alt and not flags.ctrl and not flags.fn
 
     if isOnlyCmd then
-        if not dockBadgesCanvas and not dockBadgesTimer then
-            dockBadgesTimer = hs.timer.doAfter(0.14, function()
-                showDockBadges()
+        if not dockBadgesTimer and (not dockBadgesCanvas or not dockBadgesCanvas:isShowing()) then
+            dockBadgesTimer = hs.timer.doAfter(0.18, function()
                 dockBadgesTimer = nil
+                showDockBadges()
             end)
         end
     else
@@ -226,6 +261,13 @@ local flagsWatcher = hs.eventtap.new({
     end
 
     return false
+end):start()
+
+hs.screen.watcher.new(function()
+    if dockBadgesCanvas then
+        dockBadgesCanvas:delete()
+        dockBadgesCanvas = nil
+    end
 end):start()
 
 -- Helper to get running hs.application for a dock item
