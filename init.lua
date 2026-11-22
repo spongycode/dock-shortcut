@@ -163,7 +163,7 @@ local function buildDockBadgesCanvas()
         local f = item:attributeValue("AXFrame")
         if f then
             local cx = f.x + (f.w / 2)
-            local cy = f.y + 4
+            local cy = f.y + 14
             table.insert(points, { slot = idx - 1, cx = cx, cy = cy })
             if cx < minX then minX = cx end
             if cx > maxX then maxX = cx end
@@ -175,9 +175,9 @@ local function buildDockBadgesCanvas()
     if #points == 0 then return end
 
     local canvasX = minX - 25
-    local canvasY = minY - 25
+    local canvasY = minY - 30
     local canvasW = (maxX - minX) + 50
-    local canvasH = 50
+    local canvasH = 60
 
     dockBadgesCanvas = hs.canvas.new({ x = canvasX, y = canvasY, w = canvasW, h = canvasH })
     dockBadgesCanvas:level(hs.canvas.windowLevels.overlay)
