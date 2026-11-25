@@ -8,6 +8,7 @@ Windows-style `Cmd + 1..9` shortcuts to launch and switch between macOS Dock app
 | :--- | :--- |
 | **`Cmd + 1` ... `9`** | Focus / launch Dock app at slot 1 to 9 (cycles open windows/tabs on repeat) |
 | **`Cmd + 0`** | Focus Finder |
+| **`Cmd + Option + 0` ... `9`** | Hide app if frontmost, otherwise focus / launch |
 
 ## Setup
 

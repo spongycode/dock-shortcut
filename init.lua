@@ -121,10 +121,80 @@ local function getApplicationDockItems()
     return appItems
 end
 
+-- Dock item lookup helpers
+local function getDockItemMeta(dockItem)
+    local title = dockItem:attributeValue("AXTitle")
+    local axUrl = dockItem:attributeValue("AXURL")
+    local bundleID = nil
+    if axUrl and axUrl.filePath then
+        local info = hs.application.infoForBundlePath(axUrl.filePath)
+        bundleID = info and info.CFBundleIdentifier
+    end
+    return title, bundleID
+end
+
+local function findRunningApp(bundleID, title)
+    if bundleID then
+        local apps = hs.application.applicationsForBundleID(bundleID)
+        return (apps and #apps > 0) and apps[1] or nil
+    end
+    if title and title ~= "" then
+        return hs.application.get(title) or hs.application.find(title)
+    end
+    return nil
+end
+
+local function isAppFrontmost(targetApp, appTitle, frontmost)
+    if not frontmost then return false end
+    if targetApp then
+        if frontmost:pid() == targetApp:pid() then
+            return true
+        end
+        local frontBid = frontmost:bundleID()
+        local targetBid = targetApp:bundleID()
+        if frontBid and targetBid and frontBid == targetBid then
+            return true
+        end
+    elseif appTitle and appTitle ~= "" and frontmost:title() == appTitle then
+        return true
+    end
+    return false
+end
+
 -- Dock number badges
+local BADGE_STYLES = {
+    focused = {
+        fill = { white = 0.98, alpha = 0.98 },
+        stroke = { red = 0.18, green = 0.52, blue = 1.0, alpha = 1.0 },
+        strokeWidth = 2.0,
+        textColor = { white = 0.08, alpha = 1.0 },
+    },
+    running = {
+        fill = { red = 0.12, green = 0.12, blue = 0.12, alpha = 0.95 },
+        stroke = { white = 1.0, alpha = 0.55 },
+        strokeWidth = 1.3,
+        textColor = { white = 1.0, alpha = 1.0 },
+    },
+    unlaunched = {
+        fill = { red = 0.12, green = 0.12, blue = 0.12, alpha = 0.48 },
+        stroke = { white = 1.0, alpha = 0.18 },
+        strokeWidth = 1.0,
+        textColor = { white = 0.78, alpha = 0.70 },
+    },
+}
+
 local dockBadgesCanvas = nil
+local dockBadgeEntries = {}
 local dockBadgesTimer = nil
 local dockBadgesWatchdog = nil
+
+local function makeBadgeText(slot, color)
+    return hs.styledtext.new(tostring(slot), {
+        font = { name = ".AppleSystemUIFontBold", size = 12 },
+        color = color,
+        paragraphStyle = { alignment = "center" }
+    })
+end
 
 local function isCmdOnlyPressed()
     local flags = hs.eventtap.checkKeyboardModifiers()
@@ -150,6 +220,7 @@ local function buildDockBadgesCanvas()
         dockBadgesCanvas:delete()
         dockBadgesCanvas = nil
     end
+    dockBadgeEntries = {}
 
     local appItems = getApplicationDockItems()
     if not appItems or #appItems == 0 then return end
@@ -164,7 +235,14 @@ local function buildDockBadgesCanvas()
         if f then
             local cx = f.x + (f.w / 2)
             local cy = f.y + 14
-            table.insert(points, { slot = idx - 1, cx = cx, cy = cy })
+            local title, bundleID = getDockItemMeta(item)
+            table.insert(points, {
+                slot = idx - 1,
+                cx = cx,
+                cy = cy,
+                title = title,
+                bundleID = bundleID,
+            })
             if cx < minX then minX = cx end
             if cx > maxX then maxX = cx end
             if cy < minY then minY = cy end
@@ -183,32 +261,62 @@ local function buildDockBadgesCanvas()
     dockBadgesCanvas:level(hs.canvas.windowLevels.overlay)
     dockBadgesCanvas:behavior(hs.canvas.windowBehaviors.canJoinAllSpaces + hs.canvas.windowBehaviors.stationary)
 
+    local defaultStyle = BADGE_STYLES.running
     local elemIdx = 1
     for _, p in ipairs(points) do
         local lx = p.cx - canvasX
         local ly = p.cy - canvasY
+        local circleIdx = elemIdx
+        local textIdx = elemIdx + 1
 
-        dockBadgesCanvas[elemIdx] = {
+        dockBadgesCanvas[circleIdx] = {
             type = "circle",
             action = "strokeAndFill",
             center = { x = lx, y = ly },
             radius = 11,
-            fillColor = { red = 0.12, green = 0.12, blue = 0.12, alpha = 0.95 },
-            strokeColor = { white = 1.0, alpha = 0.35 },
-            strokeWidth = 1.2,
+            fillColor = defaultStyle.fill,
+            strokeColor = defaultStyle.stroke,
+            strokeWidth = defaultStyle.strokeWidth,
         }
-        elemIdx = elemIdx + 1
 
-        dockBadgesCanvas[elemIdx] = {
+        dockBadgesCanvas[textIdx] = {
             type = "text",
-            text = hs.styledtext.new(tostring(p.slot), {
-                font = { name = ".AppleSystemUIFontBold", size = 12 },
-                color = { white = 1.0, alpha = 1.0 },
-                paragraphStyle = { alignment = "center" }
-            }),
+            text = makeBadgeText(p.slot, defaultStyle.textColor),
             frame = { x = lx - 11, y = ly - 8, w = 22, h = 16 }
         }
-        elemIdx = elemIdx + 1
+
+        table.insert(dockBadgeEntries, {
+            slot = p.slot,
+            title = p.title,
+            bundleID = p.bundleID,
+            circleIdx = circleIdx,
+            textIdx = textIdx,
+            lastState = nil,
+        })
+        elemIdx = elemIdx + 2
+    end
+end
+
+local function updateDockBadgeStyles()
+    if not dockBadgesCanvas then return end
+    local frontmost = hs.application.frontmostApplication()
+
+    for _, entry in ipairs(dockBadgeEntries) do
+        local app = findRunningApp(entry.bundleID, entry.title)
+        local state = "unlaunched"
+        if app then
+            state = isAppFrontmost(app, entry.title, frontmost) and "focused" or "running"
+        end
+
+        if state ~= entry.lastState then
+            local style = BADGE_STYLES[state]
+            local circle = dockBadgesCanvas[entry.circleIdx]
+            circle.fillColor = style.fill
+            circle.strokeColor = style.stroke
+            circle.strokeWidth = style.strokeWidth
+            dockBadgesCanvas[entry.textIdx].text = makeBadgeText(entry.slot, style.textColor)
+            entry.lastState = state
+        end
     end
 end
 
@@ -223,13 +331,16 @@ local function showDockBadges()
         buildDockBadgesCanvas()
     end
 
-    if dockBadgesCanvas and not dockBadgesCanvas:isShowing() then
-        dockBadgesCanvas:show()
+    if dockBadgesCanvas then
+        updateDockBadgeStyles()
+        if not dockBadgesCanvas:isShowing() then
+            dockBadgesCanvas:show()
 
-        if dockBadgesWatchdog then dockBadgesWatchdog:stop() end
-        dockBadgesWatchdog = hs.timer.doAfter(3.5, function()
-            hideDockBadges()
-        end)
+            if dockBadgesWatchdog then dockBadgesWatchdog:stop() end
+            dockBadgesWatchdog = hs.timer.doAfter(3.5, function()
+                hideDockBadges()
+            end)
+        end
     end
 end
 
@@ -239,6 +350,7 @@ local function invalidateDockBadges()
         dockBadgesCanvas:delete()
         dockBadgesCanvas = nil
     end
+    dockBadgeEntries = {}
 end
 
 DockFlagsWatcher = hs.eventtap.new({
@@ -299,23 +411,31 @@ end):start()
 
 DockTapKeepAliveTimer = hs.timer.doEvery(5, ensureFlagsWatcher)
 
--- Helper to get running hs.application for a dock item
-local function getAppForDockItem(dockItem)
-    local title = dockItem:attributeValue("AXTitle")
-    local axUrl = dockItem:attributeValue("AXURL")
-    local bundleID = nil
-    if axUrl and axUrl.filePath then
-        local info = hs.application.infoForBundlePath(axUrl.filePath)
-        bundleID = info and info.CFBundleIdentifier
+-- Resolve target Dock item and running app for a slot (0 = Finder, 1..9 = apps)
+local function resolveDockSlot(slotNumber)
+    hideDockBadges()
+    if not hs.accessibilityState() then
+        hs.alert.show("Hammerspoon needs Accessibility permission! Restart Hammerspoon after granting.", 2)
+        return nil
     end
-    if bundleID then
-        local apps = hs.application.applicationsForBundleID(bundleID)
-        if apps and #apps > 0 then return apps[1] end
+
+    local appItems = getApplicationDockItems()
+    if not appItems or #appItems == 0 then
+        return nil
     end
-    if title and title ~= "" then
-        return hs.application.get(title) or hs.application.find(title)
+
+    local targetItem = (slotNumber == 0) and appItems[1] or appItems[slotNumber + 1]
+    if not targetItem then
+        return nil
     end
-    return nil
+
+    local appTitle, bundleID = getDockItemMeta(targetItem)
+    appTitle = appTitle or "App"
+    local targetApp = findRunningApp(bundleID, appTitle)
+    local frontmost = hs.application.frontmostApplication()
+    local alreadyFrontmost = isAppFrontmost(targetApp, appTitle, frontmost)
+
+    return targetItem, appTitle, targetApp, alreadyFrontmost
 end
 
 -- Cycle windows via app Window menu
@@ -419,47 +539,8 @@ end
 
 -- Helper to activate or cycle windows of an app
 local function activateDockSlot(slotNumber)
-    hideDockBadges()
-    if not hs.accessibilityState() then
-        hs.alert.show("Hammerspoon needs Accessibility permission! Restart Hammerspoon after granting.", 2)
-        return
-    end
-
-    local appItems = getApplicationDockItems()
-    if not appItems or #appItems == 0 then
-        return
-    end
-
-    -- In Dock order:
-    -- appItems[1] is Finder.
-    -- appItems[2] is App 1 (e.g. Google Chrome).
-    -- appItems[3] is App 2 (e.g. Slack).
-    -- appItems[N + 1] is App N.
-    local targetItem = nil
-    if slotNumber == 0 then
-        targetItem = appItems[1] -- Finder
-    else
-        targetItem = appItems[slotNumber + 1]
-    end
-
-    if not targetItem then
-        return
-    end
-
-    local appTitle = targetItem:attributeValue("AXTitle") or "App"
-    local targetApp = getAppForDockItem(targetItem)
-    local frontmost = hs.application.frontmostApplication()
-
-    local isAlreadyFrontmost = false
-    if targetApp and frontmost then
-        if frontmost:pid() == targetApp:pid() then
-            isAlreadyFrontmost = true
-        elseif frontmost:bundleID() and targetApp:bundleID() and frontmost:bundleID() == targetApp:bundleID() then
-            isAlreadyFrontmost = true
-        end
-    elseif frontmost and appTitle and frontmost:title() == appTitle then
-        isAlreadyFrontmost = true
-    end
+    local targetItem, appTitle, targetApp, isAlreadyFrontmost = resolveDockSlot(slotNumber)
+    if not targetItem then return end
 
     if CYCLE_WINDOWS_IF_FOCUSED and isAlreadyFrontmost and targetApp then
         -- Terminal tabs
@@ -514,16 +595,33 @@ local function activateDockSlot(slotNumber)
     targetItem:performAction("AXPress")
 end
 
--- Bind Command + 1 ... 9 to Apps 1 ... 9
-for i = 1, 9 do
-    hs.hotkey.bind({"cmd"}, tostring(i), function()
-        activateDockSlot(i)
-    end)
+-- Helper to hide app if frontmost, otherwise unhide/focus/launch
+local function toggleDockSlot(slotNumber)
+    local targetItem, appTitle, targetApp, isAlreadyFrontmost = resolveDockSlot(slotNumber)
+    if not targetItem then return end
+
+    if isAlreadyFrontmost and targetApp then
+        targetApp:hide()
+        showMinimalToast(slotNumber, appTitle, "Hidden")
+        return
+    end
+
+    if targetApp and targetApp:isHidden() then
+        targetApp:unhide()
+    end
+    showMinimalToast(slotNumber, appTitle, nil)
+    targetItem:performAction("AXPress")
 end
 
--- Bind Command + 0 to Finder
-hs.hotkey.bind({"cmd"}, "0", function()
-    activateDockSlot(0)
-end)
+-- Bind Command + 0..9 (focus/cycle) and Command + Option + 0..9 (hide/toggle)
+for i = 0, 9 do
+    local key = tostring(i)
+    hs.hotkey.bind({"cmd"}, key, function()
+        activateDockSlot(i)
+    end)
+    hs.hotkey.bind({"cmd", "alt"}, key, function()
+        toggleDockSlot(i)
+    end)
+end
 
 showMinimalToast(0, "Dock Shortcuts Ready", "Cmd + 1..9 Active")
