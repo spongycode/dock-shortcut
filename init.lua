@@ -10,8 +10,8 @@ local CYCLE_WINDOWS_IF_FOCUSED = true
 
 hs.autoLaunch(true)
 
--- Auto-reload config on save
-hs.pathwatcher.new(os.getenv("HOME") .. "/.hammerspoon/", function(files)
+-- Auto-reload config on save (global refs prevent Lua GC from stopping watchers)
+DockPathWatcher = hs.pathwatcher.new(os.getenv("HOME") .. "/.hammerspoon/", function(files)
     for _, file in pairs(files) do
         if file:sub(-4) == ".lua" then
             hs.reload()
@@ -233,7 +233,15 @@ local function showDockBadges()
     end
 end
 
-local flagsWatcher = hs.eventtap.new({
+local function invalidateDockBadges()
+    hideDockBadges()
+    if dockBadgesCanvas then
+        dockBadgesCanvas:delete()
+        dockBadgesCanvas = nil
+    end
+end
+
+DockFlagsWatcher = hs.eventtap.new({
     hs.eventtap.event.types.flagsChanged,
     hs.eventtap.event.types.keyDown,
     hs.eventtap.event.types.leftMouseDown,
@@ -263,12 +271,33 @@ local flagsWatcher = hs.eventtap.new({
     return false
 end):start()
 
-hs.screen.watcher.new(function()
-    if dockBadgesCanvas then
-        dockBadgesCanvas:delete()
-        dockBadgesCanvas = nil
+DockScreenWatcher = hs.screen.watcher.new(function()
+    invalidateDockBadges()
+end):start()
+
+DockAppWatcher = hs.application.watcher.new(function(_, eventType)
+    if eventType == hs.application.watcher.launched or eventType == hs.application.watcher.terminated then
+        invalidateDockBadges()
     end
 end):start()
+
+-- Re-enable eventtap if macOS disables it after sleep/wake or heavy CPU load
+local function ensureFlagsWatcher()
+    if DockFlagsWatcher and not DockFlagsWatcher:isEnabled() then
+        DockFlagsWatcher:start()
+    end
+end
+
+DockCaffeinateWatcher = hs.caffeinate.watcher.new(function(eventType)
+    if eventType == hs.caffeinate.watcher.systemDidWake
+        or eventType == hs.caffeinate.watcher.screensDidWake
+        or eventType == hs.caffeinate.watcher.sessionDidBecomeActive then
+        invalidateDockBadges()
+        ensureFlagsWatcher()
+    end
+end):start()
+
+DockTapKeepAliveTimer = hs.timer.doEvery(5, ensureFlagsWatcher)
 
 -- Helper to get running hs.application for a dock item
 local function getAppForDockItem(dockItem)
